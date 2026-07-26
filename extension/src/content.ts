@@ -2,10 +2,9 @@
 // revision handling, flush heuristics, end detection) adapted from
 // transcriptonic (https://github.com/vivek-nexus/transcriptonic), MIT.
 import type { MeetingMeta, TranscriptSegment } from "@meet2linear/shared";
+import type { ExtensionMessage } from "./messages.js";
 import { CAPTION_REGION, ICONS, OWN_NAME, captionRegion, findIcon, iconButton } from "./selectors.js";
-import { persistMeeting, type ExtensionMessage } from "./shared-state.js";
 
-const SNAPSHOT_INTERVAL_MS = 30_000;
 const HEALTH_INTERVAL_MS = 2_000;
 // Meet replaces a long caption block with a fresh short one when it rolls
 // over; a sudden large text-length drop distinguishes that from a revision.
@@ -30,7 +29,7 @@ let current: CurrentBlock | null = null;
 
 let observer: MutationObserver | null = null;
 let healthTimer: number | undefined;
-let snapshotTimer: number | undefined;
+let updateTimer: number | undefined;
 
 // ---------- helpers ----------
 
@@ -69,6 +68,16 @@ function send(message: ExtensionMessage): void {
   chrome.runtime.sendMessage(message).catch((err) => log("sendMessage failed", err));
 }
 
+// Trailing-edge throttle: push the transcript to the service worker shortly
+// after a burst of flushes settles, so storage always has a near-live copy.
+function scheduleUpdate(): void {
+  if (!meta || ended) return;
+  clearTimeout(updateTimer);
+  updateTimer = window.setTimeout(() => {
+    if (meta && !ended) send({ type: "transcript_update", meta, segments });
+  }, 2000);
+}
+
 // ---------- transcript buffering ----------
 
 function flush(): void {
@@ -84,7 +93,7 @@ function flush(): void {
       text: current.text.trim(),
       timestamp: current.startedAt,
     });
-    if (meta) void persistMeeting(meta, segments);
+    scheduleUpdate();
   }
   current = null;
 }
@@ -139,10 +148,9 @@ function endMeeting(reason: string): void {
   log("meeting ended:", reason);
   observer?.disconnect();
   clearInterval(healthTimer);
-  clearInterval(snapshotTimer);
+  clearTimeout(updateTimer);
   flush();
   meta.endedAt = new Date().toISOString();
-  void persistMeeting(meta, segments);
   send({ type: "meeting_ended", meta, segments });
 }
 
@@ -209,10 +217,6 @@ async function main(): Promise<void> {
   );
   startHealthMonitor();
   window.addEventListener("beforeunload", () => endMeeting("page unloaded"));
-
-  snapshotTimer = window.setInterval(() => {
-    if (meta && segments.length > 0) send({ type: "snapshot", meta, segments });
-  }, SNAPSHOT_INTERVAL_MS);
 }
 
 void main();

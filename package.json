@@ -1,16 +1,14 @@
 {
   "name": "meet2linear",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "workspaces": [
     "shared",
-    "server",
     "extension"
   ],
   "scripts": {
-    "dev": "npm run dev -w server",
-    "build:ext": "npm run build -w extension",
-    "extract": "npm run extract -w server --",
+    "build": "npm run build -w extension",
+    "watch": "npm run watch -w extension",
     "typecheck": "npm run typecheck --workspaces --if-present"
   }
 }

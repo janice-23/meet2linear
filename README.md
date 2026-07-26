@@ -1,72 +1,62 @@
 # meet2linear
 
-Turns Google Meet calls into Linear tickets, with zero paid services:
+Turns Google Meet calls into Linear tickets — **entirely inside a Chrome extension**, no server, no paid services:
 
-1. A Chrome extension scrapes Meet's **free live captions** (speaker-attributed) during the call.
-2. When the call ends, the transcript is posted to a **local server**.
-3. **Gemini Flash** (free tier) extracts candidate tickets — bugs, feature requests — with verbatim evidence quotes.
-4. You review, edit, approve or discard them in a **local web UI**; approved ones are created in **Linear** (free plan API) with a `from-meet` label.
+1. A content script scrapes Meet's **free live captions** (speaker-attributed) during the call.
+2. When the call ends, the transcript lands in `chrome.storage` and **Gemini Flash** (free-tier API key) extracts candidate tickets — bugs, feature requests — with verbatim evidence quotes.
+3. Click the toolbar icon to open the **review page**: edit, approve or discard candidates; approved ones are created in **Linear** (free-plan GraphQL API) with a `from-meet` label.
+
+Node is needed only to *build* the extension; nothing runs outside the browser. Gemini and Linear are called directly from extension contexts (raw REST/GraphQL — no SDKs bundled).
 
 Caption-capture mechanics (selectors, ASR-revision handling, end detection) are adapted from [transcriptonic](https://github.com/vivek-nexus/transcriptonic).
 
 ## Layout
 
-- `shared/` — types + Zod schemas used by everything
-- `server/` — Hono server: transcript intake, Gemini extraction, Linear creation, review UI (`server/public/`)
-- `extension/` — Chrome MV3 extension: caption capture (`content.ts`), delivery + retry (`background.ts`), all Meet DOM selectors in `selectors.ts`
-
-Storage is flat JSON, one file per meeting, in `server/data/` (gitignored).
+- `shared/` — types + Zod schemas
+- `extension/src/`
+  - `content.ts` — caption capture on meet.google.com; `selectors.ts` holds every Meet DOM selector (the churn blast-radius)
+  - `background.ts` — service worker: single writer of meeting records, auto-runs extraction at meeting end
+  - `store.ts` — chrome.storage-backed meetings + settings
+  - `extraction.ts` / `prompt.ts` — Gemini structured-output extraction (`gemini-flash-latest`)
+  - `linear.ts` — raw GraphQL: teams, label bootstrap, issue creation
+  - `review/` — the review page (toolbar icon opens it)
 
 ## Setup
 
-Requires Node ≥ 22 (uses `loadEnvFile`).
-
 ```sh
 npm install
-cp .env.example .env   # then fill in the keys — see comments in the file
-npm run dev            # server + review UI at http://localhost:7337
+npm run build          # or: npm run watch
 ```
 
-To find your `LINEAR_TEAM_ID`: set the two API keys in `.env`, start the server, then
-`curl http://localhost:7337/api/config/linear`.
+Chrome → `chrome://extensions` → enable Developer mode → **Load unpacked** → select `extension/dist/`.
 
-Build and load the extension:
+Then click the extension's toolbar icon → **⚙ Settings**:
 
-```sh
-npm run build:ext
-```
+1. Paste a Gemini API key ([free from Google AI Studio](https://aistudio.google.com/apikey)).
+2. Paste a Linear personal API key (Linear → Settings → Security & Access; free plan works).
+3. Click **Load teams** and pick the team issues should go to.
 
-Then in Chrome: `chrome://extensions` → enable Developer mode → **Load unpacked** → select `extension/dist/`.
+Keys live in `chrome.storage.local` on your machine.
 
 ## Try it without a meeting
 
-```sh
-# Gemini extraction on the bundled fake customer call (needs GEMINI_API_KEY):
-npm run extract -- fixtures/sample-transcript.json
-
-# Or drive the whole server path (extraction runs async; watch the UI):
-curl -X POST http://localhost:7337/api/transcripts \
-  -H 'content-type: application/json' \
-  -d @server/fixtures/sample-transcript.json
-```
-
-The fixture contains three bugs (one mentioned twice — tests dedup), one feature request, and two red herrings (an issue resolved live on the call, and small talk).
+On the review page, click **Load sample call** — it imports a bundled fake customer call and runs extraction. The fixture contains three bugs (one mentioned twice — tests dedup), one feature request, and two red herrings (an issue resolved live on the call, and small talk). Approve one to verify Linear creation end-to-end.
 
 ## End-to-end checklist
 
-1. `npm run dev` — startup line shows ✓ for gemini key, linear key, and team.
-2. Extension built and loaded unpacked; server running.
-3. Start a Meet with yourself (meet.google.com → New meeting), **allow the "capturing captions" banner to appear** (the extension auto-enables CC; if it can't find the button it tells you to enable CC manually).
-4. Say a few scripted sentences aloud, e.g. "The CSV export is broken, the header row is missing" — watch caption text appear.
-5. Leave the call. The extension posts the transcript; extraction starts automatically.
-6. Open http://localhost:7337 — the meeting appears; candidates show up when extraction finishes (a few seconds).
-7. Edit a title if you like, click **Approve → Linear**, follow the issue link.
+1. Extension built, loaded unpacked, keys + team set in Settings.
+2. Start a Meet with yourself (meet.google.com → New meeting); wait for the "capturing captions" banner (the extension auto-enables CC; if it can't find the button it tells you to enable CC manually).
+3. Say a few scripted sentences aloud, e.g. "The CSV export is broken, the header row is missing" — captions should appear as you speak.
+4. Leave the call — extraction runs automatically.
+5. Click the toolbar icon: the meeting is listed, candidates appear within seconds.
+6. Edit a title if you like, **Approve → Linear**, follow the issue link.
 
 ## Notes & limitations
 
-- **Captions must be on** — the extension auto-clicks CC, and warns on-page if it can't.
-- **Meet DOM churn** is the main fragility. Everything selector-ish is in `extension/src/selectors.ts`, favoring ARIA attributes and icon-ligature names over class names. If capture silently stops, start there (the health monitor shows an on-page banner when the caption region disappears).
-- Evidence quotes the model didn't copy verbatim from the transcript are flagged ⚠ in the UI (hallucination guard).
-- Re-extraction (button in the UI) replaces only `proposed` candidates; approved/discarded ones are kept.
-- If the server is down at call end, the transcript is kept in `chrome.storage.local` and re-sent on next browser start.
+- **Captions must be on** — the extension auto-clicks CC and warns on-page if it can't.
+- **Meet DOM churn** is the main fragility. All selectors are in `extension/src/selectors.ts`, favoring ARIA attributes and icon-ligature names over class names. If capture silently stops, start there (a health monitor shows an on-page banner when the caption region disappears).
+- Evidence quotes the model didn't copy verbatim are flagged ⚠ in the review UI (hallucination guard).
+- Re-extraction replaces only `proposed` candidates; approved/discarded ones are kept.
+- The service worker is the sole writer of meeting records; the review page updates live via `storage.onChanged`.
 - Free-tier limits are a non-issue at this volume: one Gemini call per meeting; Linear calls only on approve.
+- History: `git log` has an earlier iteration where extraction/Linear ran on a local Node server instead of in the extension.

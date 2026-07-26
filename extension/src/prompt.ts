@@ -1,30 +1,30 @@
-import { Type, type Schema } from "@google/genai";
 import type { MeetingMeta } from "@meet2linear/shared";
 
-// Gemini structured-output schema, mirrored by ExtractionResultSchema (Zod) in shared/
-export const extractionResponseSchema: Schema = {
-  type: Type.OBJECT,
+// Gemini REST responseSchema (OpenAPI subset), mirrored by the Zod
+// ExtractionResultSchema in shared/ which validates what comes back.
+export const extractionResponseSchema = {
+  type: "OBJECT",
   properties: {
     candidates: {
-      type: Type.ARRAY,
+      type: "ARRAY",
       items: {
-        type: Type.OBJECT,
+        type: "OBJECT",
         properties: {
-          type: { type: Type.STRING, enum: ["bug", "feature_request", "other"] },
-          title: { type: Type.STRING },
-          description: { type: Type.STRING },
+          type: { type: "STRING", enum: ["bug", "feature_request", "other"] },
+          title: { type: "STRING" },
+          description: { type: "STRING" },
           evidence: {
-            type: Type.ARRAY,
+            type: "ARRAY",
             items: {
-              type: Type.OBJECT,
+              type: "OBJECT",
               properties: {
-                speaker: { type: Type.STRING },
-                quote: { type: Type.STRING },
+                speaker: { type: "STRING" },
+                quote: { type: "STRING" },
               },
               required: ["speaker", "quote"],
             },
           },
-          confidence: { type: Type.NUMBER },
+          confidence: { type: "NUMBER" },
         },
         required: ["type", "title", "description", "evidence", "confidence"],
         propertyOrdering: ["type", "title", "description", "evidence", "confidence"],
@@ -32,7 +32,7 @@ export const extractionResponseSchema: Schema = {
     },
   },
   required: ["candidates"],
-};
+} as const;
 
 export function buildExtractionPrompt(meta: MeetingMeta, transcriptText: string): string {
   return `You triage customer calls for a software team. Below is the transcript of a call${
