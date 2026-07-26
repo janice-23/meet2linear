@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "meet2linear",
+  "version": "0.1.0",
+  "description": "Captures Google Meet live captions and sends the transcript to your local meet2linear server at call end.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://meet.google.com/*", "http://localhost:7337/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}

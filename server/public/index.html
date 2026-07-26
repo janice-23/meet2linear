@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>meet2linear — review</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --panel2: #1e2230; --border: #2a2f3d;
+      --text: #e6e9f0; --muted: #8b93a7; --accent: #5e6ad2;
+      --bug: #e5534b; --feature: #57ab5a; --other: #8b93a7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 12px; }
+    header h1 { font-size: 16px; margin: 0; }
+    header .sub { color: var(--muted); font-size: 12px; }
+    main { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 49px); }
+    #meetings { border-right: 1px solid var(--border); padding: 12px; overflow-y: auto; }
+    .meeting { padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 6px; border: 1px solid transparent; }
+    .meeting:hover { background: var(--panel); }
+    .meeting.active { background: var(--panel2); border-color: var(--border); }
+    .meeting .title { font-weight: 600; }
+    .meeting .info { color: var(--muted); font-size: 12px; }
+    #detail { padding: 20px; overflow-y: auto; }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .toolbar h2 { font-size: 15px; margin: 0; flex: 1; }
+    .state { font-size: 12px; color: var(--muted); }
+    .state.error { color: var(--bug); }
+    button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+    .card.discarded { opacity: 0.45; }
+    .card .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .badge.bug { background: color-mix(in srgb, var(--bug) 20%, transparent); color: var(--bug); }
+    .badge.feature_request { background: color-mix(in srgb, var(--feature) 20%, transparent); color: var(--feature); }
+    .badge.other { background: color-mix(in srgb, var(--other) 20%, transparent); color: var(--other); }
+    .conf { font-size: 12px; color: var(--muted); }
+    input.title { flex: 1; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--text); font-size: 14px; font-weight: 600; padding: 4px 8px; }
+    textarea.desc { width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font: inherit; padding: 8px; min-height: 70px; resize: vertical; }
+    input.title:focus, textarea.desc:focus { outline: none; border-color: var(--accent); background: var(--panel2); }
+    .evidence { margin: 10px 0 4px; padding-left: 10px; border-left: 3px solid var(--border); }
+    .evidence .quote { margin: 4px 0; color: var(--muted); font-size: 13px; }
+    .evidence .quote b { color: var(--text); }
+    .evidence .quote .unverified { color: var(--bug); font-size: 11px; margin-left: 6px; }
+    .actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+    .actions .link { color: var(--accent); font-size: 13px; text-decoration: none; }
+    details.lowconf > summary { cursor: pointer; color: var(--muted); margin: 18px 0 10px; }
+    .empty { color: var(--muted); padding: 40px; text-align: center; }
+    #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; display: none; max-width: 380px; }
+    #toast.error { border-color: var(--bug); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>meet2linear</h1>
+    <span class="sub">review proposed tickets before they hit Linear</span>
+  </header>
+  <main>
+    <nav id="meetings"></nav>
+    <section id="detail"><div class="empty">Select a meeting</div></section>
+  </main>
+  <div id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
