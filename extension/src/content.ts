@@ -1,13 +1,19 @@
-// Caption capture for Google Meet. Core mechanics (selectors, in-place ASR
-// revision handling, flush heuristics, end detection) adapted from
-// transcriptonic (https://github.com/vivek-nexus/transcriptonic), MIT.
+// Caption capture for Google Meet.
+//
+// Strategy: mutations on the caption region are treated only as a SIGNAL that
+// something changed — we never interpret individual mutation records. On every
+// batch we re-read the rendered state of each caption block from the DOM and
+// diff it against what we last saw. This survives all of Meet's update modes
+// (in-place characterData edits, node replacement, block trimming), which a
+// per-mutation approach does not. Selector strategy adapted from
+// transcriptonic (https://github.com/vivek-nexus/transcriptonic).
 import type { MeetingMeta, TranscriptSegment } from "@meet2linear/shared";
 import type { ExtensionMessage } from "./messages.js";
 import { CAPTION_REGION, ICONS, OWN_NAME, captionRegion, findIcon, iconButton } from "./selectors.js";
 
 const HEALTH_INTERVAL_MS = 2_000;
-// Meet replaces a long caption block with a fresh short one when it rolls
-// over; a sudden large text-length drop distinguishes that from a revision.
+// Meet trims the front of a very long caption block; a sudden large length
+// drop distinguishes that from an ordinary recognition revision.
 const ROLLOVER_DROP_CHARS = 250;
 
 const log = (...args: unknown[]) => console.log("[meet2linear]", ...args);
@@ -19,15 +25,18 @@ const segments: TranscriptSegment[] = [];
 let ownName: string | null = null;
 let ended = false;
 
-interface CurrentBlock {
+// One entry per on-screen caption block, keyed by its DOM element. Entries are
+// updated in place while visible and finalized into `segments` when the block
+// leaves the DOM (or the meeting ends).
+interface BlockEntry {
   speaker: string;
   text: string;
-  el: Element;
   startedAt: string;
 }
-let current: CurrentBlock | null = null;
+const blocks = new Map<Element, BlockEntry>();
 
 let observer: MutationObserver | null = null;
+let observedRegion: HTMLElement | null = null;
 let healthTimer: number | undefined;
 let updateTimer: number | undefined;
 
@@ -68,65 +77,132 @@ function send(message: ExtensionMessage): void {
   chrome.runtime.sendMessage(message).catch((err) => log("sendMessage failed", err));
 }
 
+/** Finalized segments plus a snapshot of still-visible blocks, so the stored
+ *  transcript is complete even if the tab dies before blocks finalize. */
+function liveSegments(): TranscriptSegment[] {
+  const open: TranscriptSegment[] = [];
+  for (const entry of blocks.values()) {
+    const text = entry.text.trim();
+    if (!text || text === entry.speaker.trim()) continue;
+    open.push({ speaker: normalizeSpeaker(entry.speaker), text, timestamp: entry.startedAt });
+  }
+  return [...segments, ...open];
+}
+
 // Trailing-edge throttle: push the transcript to the service worker shortly
-// after a burst of flushes settles, so storage always has a near-live copy.
+// after a burst of caption activity settles.
 function scheduleUpdate(): void {
   if (!meta || ended) return;
   clearTimeout(updateTimer);
   updateTimer = window.setTimeout(() => {
-    if (meta && !ended) send({ type: "transcript_update", meta, segments });
+    if (meta && !ended) send({ type: "transcript_update", meta, segments: liveSegments() });
   }, 2000);
 }
 
-// ---------- transcript buffering ----------
+// ---------- caption block discovery & reading ----------
 
-function flush(): void {
-  if (!current || !current.text.trim()) {
-    current = null;
-    return;
+/** First element in document order with no element children and some text —
+ *  within a caption block this is the speaker-name leaf. */
+function firstLeafWithText(root: Element): Element | null {
+  if (root.childElementCount === 0) return root.textContent?.trim() ? root : null;
+  for (const el of root.querySelectorAll<HTMLElement>("*")) {
+    if (el.childElementCount === 0 && el.textContent?.trim()) return el;
   }
+  return null;
+}
+
+/** Caption blocks, structurally: each block is anchored by the speaker's
+ *  avatar <img>; the block root is the smallest ancestor that carries text
+ *  (name + speech). Falls back to unwrapping single-child wrappers if Meet
+ *  ever drops the avatars. */
+function findBlocks(region: HTMLElement): Element[] {
+  const found: Element[] = [];
+  for (const img of region.querySelectorAll("img")) {
+    let el: Element | null = img.parentElement;
+    while (el && el !== region && !el.textContent?.trim()) el = el.parentElement;
+    if (el && el !== region && !found.includes(el)) found.push(el);
+  }
+  if (found.length > 0) return found;
+  let root: Element = region;
+  while (root.childElementCount === 1) root = root.children[0]!;
+  return Array.from(root.children).filter((c) => c.textContent?.trim());
+}
+
+/** Split a block's rendered text into speaker name and spoken text. Returns
+ *  null while the block only shows a name (nothing spoken yet). */
+function readBlock(block: Element): { speaker: string; text: string } | null {
+  const full = block.textContent?.trim() ?? "";
+  if (!full) return null;
+  const name = firstLeafWithText(block)?.textContent?.trim() ?? "";
+  let text = full;
+  if (name && full.startsWith(name)) text = full.slice(name.length).trim();
+  if (!text) return null;
+  return { speaker: name, text };
+}
+
+// ---------- transcript assembly ----------
+
+function finalize(entry: BlockEntry): void {
+  const text = entry.text.trim();
+  const speaker = normalizeSpeaker(entry.speaker);
+  if (!text || text === entry.speaker.trim()) return; // name-only artifact
   const last = segments[segments.length - 1];
-  // Guard against duplicate flushes of the same block
-  if (!(last && last.speaker === normalizeSpeaker(current.speaker) && last.text === current.text.trim())) {
-    segments.push({
-      speaker: normalizeSpeaker(current.speaker),
-      text: current.text.trim(),
-      timestamp: current.startedAt,
-    });
-    scheduleUpdate();
-  }
-  current = null;
-}
-
-function updateBuffer(speaker: string, el: Element, text: string): void {
-  if (!text.trim()) return;
-  if (current && (current.el !== el || (speaker.trim() && speaker.trim() !== current.speaker))) {
-    flush(); // new caption block or new speaker turn
-  } else if (current && current.text.length - text.length > ROLLOVER_DROP_CHARS) {
-    flush(); // Meet rolled the block over; don't lose the long buffer
-  }
-  if (!current) {
-    current = { speaker: speaker.trim(), text, el, startedAt: new Date().toISOString() };
+  if (last && last.speaker === speaker && text.startsWith(last.text)) {
+    last.text = text; // extended version of what we already recorded
+  } else if (last && last.speaker === speaker && last.text.includes(text)) {
+    // shrunken duplicate of something already recorded; drop
   } else {
-    current.text = text; // in-place ASR revision: latest text wins
-    if (!current.speaker && speaker.trim()) current.speaker = speaker.trim();
+    segments.push({ speaker, text, timestamp: entry.startedAt });
+    log(`segment #${segments.length} ${speaker}: ${text.slice(0, 80)}${text.length > 80 ? "…" : ""}`);
+  }
+  scheduleUpdate();
+}
+
+function finalizeAll(): void {
+  for (const [el, entry] of blocks) {
+    finalize(entry);
+    blocks.delete(el);
   }
 }
 
-function handleMutations(mutations: MutationRecord[]): void {
-  for (const m of mutations) {
-    if (m.type !== "characterData") continue;
-    const textEl = m.target.parentElement;
-    if (!textEl) continue;
-    const text = m.target.textContent ?? "";
-    // Speaker name renders in the sibling preceding the caption text container
-    // (transcriptonic's heuristic); try one level up as a fallback.
-    const speaker =
-      textEl.previousSibling?.textContent ??
-      textEl.parentElement?.previousSibling?.textContent ??
-      "";
-    updateBuffer(speaker, textEl, text);
+function processRegion(region: HTMLElement): void {
+  for (const block of findBlocks(region)) {
+    const read = readBlock(block);
+    if (!read) continue;
+    const entry = blocks.get(block);
+    if (!entry) {
+      blocks.set(block, { ...read, startedAt: new Date().toISOString() });
+    } else {
+      if (entry.text.length - read.text.length > ROLLOVER_DROP_CHARS) {
+        // Meet trimmed the block; bank the long version before overwriting
+        finalize(entry);
+        entry.startedAt = new Date().toISOString();
+      }
+      entry.text = read.text;
+      if (read.speaker) entry.speaker = read.speaker;
+    }
   }
+  // Blocks Meet removed from the DOM are done — bank them in order
+  for (const [el, entry] of blocks) {
+    if (!el.isConnected) {
+      finalize(entry);
+      blocks.delete(el);
+    }
+  }
+  scheduleUpdate();
+}
+
+/** (Re)attach the observer; Meet sometimes replaces the caption region element
+ *  (e.g. CC toggled off/on), which silently kills an old observer. */
+function ensureObserver(): void {
+  const region = captionRegion();
+  if (!region || region === observedRegion || ended) return;
+  observer?.disconnect();
+  observer = new MutationObserver(() => processRegion(region));
+  observer.observe(region, { childList: true, subtree: true, characterData: true });
+  observedRegion = region;
+  processRegion(region);
+  log("observing caption region");
 }
 
 // ---------- lifecycle ----------
@@ -144,12 +220,12 @@ async function enableCaptions(): Promise<void> {
 
 function endMeeting(reason: string): void {
   if (ended || !meta) return;
-  ended = true;
   log("meeting ended:", reason);
   observer?.disconnect();
   clearInterval(healthTimer);
   clearTimeout(updateTimer);
-  flush();
+  finalizeAll();
+  ended = true;
   meta.endedAt = new Date().toISOString();
   send({ type: "meeting_ended", meta, segments });
 }
@@ -162,6 +238,7 @@ function startHealthMonitor(): void {
       endMeeting("call controls disappeared (left call or removed)");
       return;
     }
+    ensureObserver();
     if (!captionRegion()) {
       missing++;
       if (missing === 5) {
@@ -190,6 +267,9 @@ async function main(): Promise<void> {
   };
   log("joined; capturing as", meta.meetingId);
 
+  // Console debugging aid: __meet2linear.segments() shows the live transcript
+  (window as unknown as Record<string, unknown>).__meet2linear = { segments: liveSegments };
+
   // Best-effort own-name capture, for normalizing the "You" speaker label
   const nameInterval = setInterval(() => {
     const el = document.querySelector(OWN_NAME);
@@ -207,8 +287,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  observer = new MutationObserver(handleMutations);
-  observer.observe(region, { childList: true, subtree: true, characterData: true });
+  ensureObserver();
   banner("capturing captions");
 
   // End detection: leave-button click + health monitor + page unload
