@@ -19,6 +19,7 @@ const $detail = document.getElementById("detail")!;
 const $toast = document.getElementById("toast")!;
 
 let activeMeetingId: string | null = null;
+let showTranscript = false;
 
 const CONFIDENCE_CUTOFF = 0.5;
 
@@ -90,14 +91,44 @@ async function renderDetail(): Promise<void> {
   toolbar.innerHTML = `
     <h2></h2>
     <span class="state ${meeting.extractionState === "error" ? "error" : ""}"></span>
+    <button id="transcript-toggle"></button>
     <button id="reextract">Re-extract</button>`;
   toolbar.querySelector("h2")!.textContent = meeting.meta.title || meeting.meta.meetingId;
   toolbar.querySelector(".state")!.textContent = stateText ?? "";
+  const toggle = toolbar.querySelector("#transcript-toggle") as HTMLButtonElement;
+  toggle.textContent = showTranscript
+    ? "Hide transcript"
+    : `Transcript (${meeting.segments.length})`;
+  toggle.onclick = () => {
+    showTranscript = !showTranscript;
+    void renderDetail();
+  };
   (toolbar.querySelector("#reextract") as HTMLButtonElement).onclick = () => {
     toast("Extraction started");
     void runExtraction(meeting.meta.meetingId); // storage.onChanged re-renders
   };
   container.append(toolbar);
+
+  if (showTranscript) {
+    const panel = document.createElement("div");
+    panel.className = "transcript";
+    if (meeting.segments.length === 0) {
+      panel.innerHTML = '<div class="empty">No transcript captured — were captions on?</div>';
+    }
+    meeting.segments.forEach((s) => {
+      const seg = document.createElement("div");
+      seg.className = "seg";
+      const time = document.createElement("time");
+      time.textContent = new Date(s.timestamp).toLocaleTimeString([], {
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+      });
+      const speaker = document.createElement("b");
+      speaker.textContent = `${s.speaker}: `;
+      seg.append(time, speaker, s.text);
+      panel.append(seg);
+    });
+    container.append(panel);
+  }
 
   const high = meeting.candidates.filter((c) => c.confidence >= CONFIDENCE_CUTOFF);
   const low = meeting.candidates.filter((c) => c.confidence < CONFIDENCE_CUTOFF);
