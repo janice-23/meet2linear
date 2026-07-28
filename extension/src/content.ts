@@ -4,9 +4,15 @@
 // something changed — we never interpret individual mutation records. On every
 // batch we re-read the rendered state of each caption block from the DOM and
 // diff it against what we last saw. This survives all of Meet's update modes
-// (in-place characterData edits, node replacement, block trimming), which a
-// per-mutation approach does not. Selector strategy adapted from
-// transcriptonic (https://github.com/vivek-nexus/transcriptonic).
+// (in-place characterData edits, node replacement, block trimming).
+//
+// Caption block anatomy (verified live against Meet, 2026-07):
+//   region [role=region][tabindex=0][aria-label=Captions]  ← exists only while CC is ON
+//   ├─ div                       ← caption block, one per speaker turn
+//   │  ├─ div: avatar <img> + name leaf ("You" / "Jane Doe")
+//   │  └─ div: the spoken text
+//   ├─ div (spacer)
+//   └─ div > button "Jump to most recent captions"          ← must be excluded
 import type { MeetingMeta, TranscriptSegment } from "@meet2linear/shared";
 import type { ExtensionMessage } from "./messages.js";
 import { CAPTION_REGION, ICONS, OWN_NAME, captionRegion, findIcon, iconButton } from "./selectors.js";
@@ -24,6 +30,7 @@ let meta: MeetingMeta | null = null;
 const segments: TranscriptSegment[] = [];
 let ownName: string | null = null;
 let ended = false;
+let captureStarted = false;
 
 // One entry per on-screen caption block, keyed by its DOM element. Entries are
 // updated in place while visible and finalized into `segments` when the block
@@ -55,15 +62,31 @@ function waitFor<T>(probe: () => T | null, intervalMs = 500, timeoutMs = 60 * 60
   });
 }
 
+const BANNER_CSS =
+  "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:99999;" +
+  "background:#1e2230;color:#e6e9f0;border:1px solid #5e6ad2;border-radius:8px;" +
+  "padding:8px 16px;font:13px sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.4)";
+
 function banner(message: string): void {
   const el = document.createElement("div");
   el.textContent = `meet2linear: ${message}`;
-  el.style.cssText =
-    "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:99999;" +
-    "background:#1e2230;color:#e6e9f0;border:1px solid #5e6ad2;border-radius:8px;" +
-    "padding:8px 16px;font:13px sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.4)";
+  el.style.cssText = BANNER_CSS;
   document.body.append(el);
   setTimeout(() => el.remove(), 6000);
+}
+
+// A banner that stays up until the condition it describes is resolved
+let stickyBanner: HTMLElement | null = null;
+function showSticky(message: string): void {
+  if (stickyBanner) return;
+  stickyBanner = document.createElement("div");
+  stickyBanner.textContent = `meet2linear: ${message}`;
+  stickyBanner.style.cssText = BANNER_CSS + ";border-color:#e5534b";
+  document.body.append(stickyBanner);
+}
+function clearSticky(): void {
+  stickyBanner?.remove();
+  stickyBanner = null;
 }
 
 function normalizeSpeaker(name: string): string {
@@ -102,7 +125,7 @@ function scheduleUpdate(): void {
 // ---------- caption block discovery & reading ----------
 
 /** First element in document order with no element children and some text —
- *  within a caption block this is the speaker-name leaf. */
+ *  within a caption block's header this is the speaker-name leaf. */
 function firstLeafWithText(root: Element): Element | null {
   if (root.childElementCount === 0) return root.textContent?.trim() ? root : null;
   for (const el of root.querySelectorAll<HTMLElement>("*")) {
@@ -111,33 +134,31 @@ function firstLeafWithText(root: Element): Element | null {
   return null;
 }
 
-/** Caption blocks, structurally: each block is anchored by the speaker's
- *  avatar <img>; the block root is the smallest ancestor that carries text
- *  (name + speech). Falls back to unwrapping single-child wrappers if Meet
- *  ever drops the avatars. */
+/** Caption blocks are the region's direct children that carry text and do NOT
+ *  contain a button (which excludes the "Jump to most recent captions" pill). */
 function findBlocks(region: HTMLElement): Element[] {
-  const found: Element[] = [];
-  for (const img of region.querySelectorAll("img")) {
-    let el: Element | null = img.parentElement;
-    while (el && el !== region && !el.textContent?.trim()) el = el.parentElement;
-    if (el && el !== region && !found.includes(el)) found.push(el);
-  }
-  if (found.length > 0) return found;
-  let root: Element = region;
-  while (root.childElementCount === 1) root = root.children[0]!;
-  return Array.from(root.children).filter((c) => c.textContent?.trim());
+  return Array.from(region.children).filter(
+    (c) => c.textContent?.trim() && !c.querySelector("button"),
+  );
 }
 
-/** Split a block's rendered text into speaker name and spoken text. Returns
- *  null while the block only shows a name (nothing spoken yet). */
+/** Split a block into speaker name and spoken text. Primary path uses the
+ *  verified structure (header first, text container last); the fallback
+ *  strips the name prefix from the concatenated text. Returns null while a
+ *  block only shows a name (nothing spoken yet). */
 function readBlock(block: Element): { speaker: string; text: string } | null {
   const full = block.textContent?.trim() ?? "";
   if (!full) return null;
+  const kids = block.children;
+  if (kids.length >= 2) {
+    const name = firstLeafWithText(kids[0]!)?.textContent?.trim() ?? "";
+    const text = kids[kids.length - 1]!.textContent?.trim() ?? "";
+    if (text && text !== name) return { speaker: name, text };
+  }
   const name = firstLeafWithText(block)?.textContent?.trim() ?? "";
   let text = full;
   if (name && full.startsWith(name)) text = full.slice(name.length).trim();
-  if (!text) return null;
-  return { speaker: name, text };
+  return text ? { speaker: name, text } : null;
 }
 
 // ---------- transcript assembly ----------
@@ -192,8 +213,8 @@ function processRegion(region: HTMLElement): void {
   scheduleUpdate();
 }
 
-/** (Re)attach the observer; Meet sometimes replaces the caption region element
- *  (e.g. CC toggled off/on), which silently kills an old observer. */
+/** (Re)attach the observer; Meet creates the caption region when CC turns on
+ *  and may replace it later, which silently kills an old observer. */
 function ensureObserver(): void {
   const region = captionRegion();
   if (!region || region === observedRegion || ended) return;
@@ -207,14 +228,15 @@ function ensureObserver(): void {
 
 // ---------- lifecycle ----------
 
-async function enableCaptions(): Promise<void> {
+/** Best-effort: Meet ignores untrusted clicks on the CC button in at least
+ *  some builds, so success is VERIFIED by the health monitor (does the caption
+ *  region appear?), never assumed. */
+function tryEnableCaptions(): void {
   if (findIcon(ICONS.captionsOn)) return; // already on
   const button = iconButton(ICONS.captionsOff);
   if (button) {
     button.click();
-    log("enabled captions");
-  } else {
-    banner("couldn't find the captions button — turn on captions (CC) manually");
+    log("clicked the captions button (verification pending — Meet may ignore synthetic clicks)");
   }
 }
 
@@ -224,6 +246,7 @@ function endMeeting(reason: string): void {
   observer?.disconnect();
   clearInterval(healthTimer);
   clearTimeout(updateTimer);
+  clearSticky();
   finalizeAll();
   ended = true;
   meta.endedAt = new Date().toISOString();
@@ -239,14 +262,25 @@ function startHealthMonitor(): void {
       return;
     }
     ensureObserver();
-    if (!captionRegion()) {
-      missing++;
-      if (missing === 5) {
-        banner(`caption region (${CAPTION_REGION}) not found — captions off or Meet changed its DOM`);
-        log("caption region missing for 10s");
-      }
-    } else {
+    if (captionRegion()) {
       missing = 0;
+      if (!captureStarted) {
+        captureStarted = true;
+        clearSticky();
+        banner("capturing captions");
+      }
+      return;
+    }
+    missing++;
+    if (missing === 5) {
+      if (captureStarted) {
+        banner(`captions disappeared (${CAPTION_REGION} gone) — turn CC back on to keep capturing`);
+        log("caption region missing for 10s");
+      } else {
+        // Auto-enable didn't take (Meet ignores synthetic clicks); needs a human
+        showSticky("click the CC button to enable captions — capture can't start without them");
+        tryEnableCaptions(); // harmless retry in case Meet honors it this time
+      }
     }
   }, HEALTH_INTERVAL_MS);
 }
@@ -267,7 +301,8 @@ async function main(): Promise<void> {
   };
   log("joined; capturing as", meta.meetingId);
 
-  // Console debugging aid: __meet2linear.segments() shows the live transcript
+  // Console debugging aid — run in the extension's console context (select
+  // "meet2linear" in the DevTools console context dropdown):
   (window as unknown as Record<string, unknown>).__meet2linear = { segments: liveSegments };
 
   // Best-effort own-name capture, for normalizing the "You" speaker label
@@ -280,21 +315,15 @@ async function main(): Promise<void> {
   }, 100);
   setTimeout(() => clearInterval(nameInterval), 30_000);
 
-  await enableCaptions();
-  const region = await waitFor(captionRegion, 500, 30_000);
-  if (!region) {
-    banner("captions never appeared — nothing will be captured");
-    return;
-  }
+  tryEnableCaptions();
 
-  ensureObserver();
-  banner("capturing captions");
-
-  // End detection: leave-button click + health monitor + page unload
+  // The health monitor owns everything from here: attaching the observer when
+  // the caption region (re)appears, nagging when captions are off, and end
+  // detection. It never gives up for the lifetime of the call.
+  startHealthMonitor();
   iconButton(ICONS.leaveCall)?.addEventListener("click", () =>
     setTimeout(() => endMeeting("leave button clicked"), 300),
   );
-  startHealthMonitor();
   window.addEventListener("beforeunload", () => endMeeting("page unloaded"));
 }
 
